@@ -62,14 +62,29 @@ pub async fn handle_route(
             node_id,
             node_addr: addr,
         } => {
-            app.raft
-                .client_write(ClientWriteRequest::new(ClientRequest::NodeAddr {
-                    id: node_id,
-                    addr,
-                }))
-                .await?;
-            app.raft.add_non_voter(node_id).await?;
-            join_node(app.raft.as_ref(), app.raft_store.as_ref(), node_id).await?;
+            let local_node_id = app.sys_config.raft_node_id;
+            match app.raft.current_leader().await {
+                Some(leader_id) if leader_id == local_node_id => {
+                    app.raft
+                        .client_write(ClientWriteRequest::new(ClientRequest::NodeAddr {
+                            id: node_id,
+                            addr,
+                        }))
+                        .await?;
+                    app.raft.add_non_voter(node_id).await?;
+                    join_node(app.raft.as_ref(), app.raft_store.as_ref(), node_id).await?;
+                }
+                Some(leader_id) => {
+                    let leader_addr = app.raft_store.get_target_addr(leader_id).await?;
+                    router_request(
+                        RouterRequest::JoinNode { node_id, node_addr: addr },
+                        leader_addr,
+                        &app.cluster_sender,
+                    )
+                    .await?;
+                }
+                None => return Err(anyhow::anyhow!("no raft leader elected yet")),
+            }
             Ok(RouterResponse::None)
         }
         RouterRequest::TableManagerReq { req } => {
